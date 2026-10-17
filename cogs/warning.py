@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
+import asyncio
 import datetime
 import random
 import string
@@ -158,61 +159,26 @@ def is_staff(member: discord.Member) -> bool:
 
 # ==================== KANIT GÖRSELİ EKLEME GÖRÜNÜMÜ ====================
 
-class EvidenceModal(discord.ui.Modal, title="📎 Kanıt Görseli Ekle"):
-    def __init__(self, warn_id: str, log_message: discord.Message, log_channel: discord.TextChannel):
-        super().__init__()
-        self.warn_id = warn_id
-        self.log_message = log_message
-        self.log_channel = log_channel
-
-    image_url = discord.ui.TextInput(
-        label="Kanıt Görsel Linki (URL)",
-        placeholder="https://cdn.discordapp.com/... veya görsel bağlantısı",
-        style=discord.TextStyle.short,
-        required=True,
-        max_length=500
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        url = self.image_url.value.strip()
-        if not (url.startswith("http://") or url.startswith("https://")):
-            await interaction.response.send_message("❌ Geçersiz görsel bağlantısı! Link http:// veya https:// ile başlamalıdır.", ephemeral=True)
-            return
-
-        # Veritabanında güncelle
-        database.set_warning_image(self.warn_id, url)
-
-        # Log mesajındaki embed'i güncelle
-        try:
-            if self.log_message and self.log_message.embeds:
-                embed = self.log_message.embeds[0]
-                embed.set_image(url=url)
-                # Kanıt alanını güncelle
-                for i, field in enumerate(embed.fields):
-                    if "Kanıt" in field.name:
-                        embed.set_field_at(i, name="📎 Kanıt", value=f"Görsel Kanıtı: [Resim için Tıkla]({url})", inline=False)
-                        break
-                await self.log_message.edit(embed=embed)
-        except Exception as e:
-            print(f"Log mesajı kanıt güncelleme hatası: {e}")
-
-        await interaction.response.send_message(f"✅ Kanıt görseli **{self.warn_id}** numaralı uyarı kaydına başarıyla eklendi!", ephemeral=True)
-
 class EvidencePromptView(discord.ui.View):
-    def __init__(self, warn_id: str, log_message: discord.Message, log_channel: discord.TextChannel):
+    def __init__(self, warn_id: str, log_message: discord.Message, cog):
         super().__init__(timeout=60)
         self.warn_id = warn_id
         self.log_message = log_message
-        self.log_channel = log_channel
+        self.cog = cog
 
-    @discord.ui.button(label="📎 Görsel Yükle", style=discord.ButtonStyle.primary, emoji="📎")
+    @discord.ui.button(label="Görsel Yükle", style=discord.ButtonStyle.primary, emoji="📎")
     async def add_evidence(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(EvidenceModal(self.warn_id, self.log_message, self.log_channel))
+        self.stop()
+        await interaction.response.send_message(
+            "📎 Lütfen **30 saniye** içinde kanıt görselini bu kanala gönderin.\n*(Sadece resim dosyası kabul edilir)*",
+            ephemeral=True
+        )
+        await self.cog.wait_for_evidence(interaction, self.warn_id, self.log_message)
 
-    @discord.ui.button(label="⏩ Pas Geç", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Pas Geç", style=discord.ButtonStyle.secondary, emoji="⏩")
     async def skip_evidence(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
-        await interaction.response.send_message("Kanıt ekleme adımı pas geçildi. İşlem tamamlandı.", ephemeral=True)
+        await interaction.response.send_message("Kanıt ekleme adımı pas geçildi.", ephemeral=True)
 
 # ==================== MODALLER ====================
 
@@ -273,7 +239,7 @@ class UserSelectView(discord.ui.View):
         self.warn_type = warn_type # 'verbal' veya 'official'
         self.cog = cog
 
-    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Uyarı verilecek kişiyi seçin...", min_values=1, max_values=1)
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Kime uyarı vermek istiyorsunuz?", min_values=1, max_values=1)
     async def select_user(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         target = select.values[0]
         guild = interaction.guild
@@ -310,14 +276,14 @@ class WarningPanelView(discord.ui.View):
         if not await self.check_staff(interaction):
             return
         view = UserSelectView(warn_type="verbal", cog=self.cog)
-        await interaction.response.send_message("Lütfen sözlü uyarı verilecek kullanıcıyı seçin:", view=view, ephemeral=True)
+        await interaction.response.send_message("Kime uyarı vermek istiyorsunuz?", view=view, ephemeral=True)
 
     @discord.ui.button(label="Uyarı Ver", style=discord.ButtonStyle.danger, emoji="⚠️", custom_id="warn_panel_official")
     async def official_warn_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.check_staff(interaction):
             return
         view = UserSelectView(warn_type="official", cog=self.cog)
-        await interaction.response.send_message("Lütfen uyarı verilecek kullanıcıyı seçin:", view=view, ephemeral=True)
+        await interaction.response.send_message("Kime uyarı vermek istiyorsunuz?", view=view, ephemeral=True)
 
 # ==================== ANA UYARI SİSTEMİ COG ====================
 
@@ -349,70 +315,46 @@ class WarningSystem(commands.Cog):
                 return None
 
         guild = target.guild
+        divider = "\n\n***\n\n"
+        evidence_text = f"[Resim için Tıkla]({image_url})" if image_url else "Eklenmedi"
+
+        description_text = (
+            "### 👤 Taraflar\n"
+            f"**Ceza Yiyen Kişi:** {target.mention}\n"
+            f"**Yetkili:** {moderator.mention}"
+            f"{divider}"
+            "### 📌 Kayıt Özet\n"
+            f"• **Uyarı ID:** `{warn_id}`\n"
+            f"• **Yetkili:** {moderator.mention}\n"
+            f"• **Ceza Yiyen Kişi:** {target.mention}\n"
+            f"• **Uyarı Bitiş Tarihi:** {end_date_str}\n"
+            f"• **Toplam Uyarı:** {total_warns}"
+            f"{divider}"
+            "### 🚨 Verilen Uyarı Puanı:\n"
+            f"{points_text}"
+            f"{divider}"
+            "### 📝 Uyarı Sebebi:\n"
+            f"{reason_text}"
+            f"{divider}"
+            "### 🏷️ Rolleri:\n"
+            f"{roles_text if roles_text else 'Rol Bulunamadı'}"
+            f"{divider}"
+            "### 📎 Kanıt\n"
+            f"Görsel Kanıtı: {evidence_text}"
+            f"{divider}"
+            "### ⚡ Uygulanan İşlem\n"
+            f"```{action_taken}```"
+        )
+
         embed = discord.Embed(
             title="⚠️ Uyarı Var!!!",
+            description=description_text,
             color=color,
             timestamp=datetime.datetime.now(TZ)
         )
 
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-
-        # 👤 Taraflar
-        embed.add_field(
-            name="👤 Taraflar",
-            value=f"**Ceza Yiyen Kişi:** {target.mention}\n**Yetkili:** {moderator.mention}",
-            inline=False
-        )
-
-        # 📌 Kayıt Özet
-        embed.add_field(
-            name="📌 Kayıt Özet",
-            value=(
-                f"• **Uyarı ID:** `{warn_id}`\n"
-                f"• **Yetkili:** {moderator.mention}\n"
-                f"• **Ceza Yiyen Kişi:** {target.mention}\n"
-                f"• **Uyarı Bitiş Tarihi:** {end_date_str}\n"
-                f"• **Toplam Uyarı:** {total_warns}"
-            ),
-            inline=False
-        )
-
-        # 🚨 Verilen Uyarı Puanı
-        embed.add_field(
-            name="🚨 Verilen Uyarı Puanı:",
-            value=points_text,
-            inline=False
-        )
-
-        # 📝 Uyarı Sebebi
-        embed.add_field(
-            name="📝 Uyarı Sebebi:",
-            value=reason_text,
-            inline=False
-        )
-
-        # 🏷️ Rolleri
-        embed.add_field(
-            name="🏷️ Rolleri:",
-            value=roles_text if roles_text else "Rol Bulunamadı",
-            inline=False
-        )
-
-        # 📎 Kanıt
-        evidence_text = f"[Resim için Tıkla]({image_url})" if image_url else "Eklenmedi"
-        embed.add_field(
-            name="📎 Kanıt",
-            value=f"Görsel Kanıtı: {evidence_text}",
-            inline=False
-        )
-
-        # ⚡ Uygulanan İşlem
-        embed.add_field(
-            name="⚡ Uygulanan İşlem",
-            value=f"```{action_taken}```",
-            inline=False
-        )
 
         if image_url:
             embed.set_image(url=image_url)
@@ -424,6 +366,59 @@ class WarningSystem(commands.Cog):
 
         msg = await log_channel.send(content=f"{target.mention}", embed=embed)
         return msg
+
+    async def wait_for_evidence(self, interaction: discord.Interaction, warn_id: str, log_message: discord.Message):
+        """Yetkilinin kanala gönderdiği fotoğrafı okur ve log mesajına kanıt olarak ekler."""
+        def check(m: discord.Message):
+            return (
+                m.author.id == interaction.user.id
+                and m.channel.id == interaction.channel.id
+                and len(m.attachments) > 0
+                and any(
+                    (att.content_type and att.content_type.startswith("image/"))
+                    or att.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif'))
+                    for att in m.attachments
+                )
+            )
+
+        try:
+            msg = await self.bot.wait_for("message", timeout=30.0, check=check)
+        except asyncio.TimeoutError:
+            try:
+                await interaction.followup.send("⏰ Süre doldu, kanıt görseli eklenmedi.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        try:
+            attachment = msg.attachments[0]
+            img_file = await attachment.to_file()
+
+            # Kanaldaki mesajı temizle
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+            # Log mesajındaki embed'e resmi ekle
+            if log_message and log_message.embeds:
+                embed = log_message.embeds[0]
+                embed.set_image(url=f"attachment://{img_file.filename}")
+                if "Görsel Kanıtı: Eklenmedi" in embed.description:
+                    embed.description = embed.description.replace(
+                        "Görsel Kanıtı: Eklenmedi",
+                        f"Görsel Kanıtı: [Resim]({attachment.url})"
+                    )
+
+                await log_message.edit(embed=embed, attachments=[img_file])
+
+                # Veritabanında güncelle
+                database.set_warning_image(warn_id, attachment.url)
+
+            await interaction.followup.send("✅ Kanıt görseli başarıyla eklendi!", ephemeral=True)
+        except Exception as e:
+            print(f"Kanıt görseli işleme hatası: {e}")
+            await interaction.followup.send(f"❌ Görsel eklenirken bir hata oluştu: {e}", ephemeral=True)
 
     # ------------------ SÖZLÜ UYARI İŞLEYİŞİ ------------------
 
@@ -468,11 +463,10 @@ class WarningSystem(commands.Cog):
             database.set_warning_log_message_id(warn_id, msg.id)
 
         # Yetkiliye kanıt ekleme butonları sun
-        log_channel = self.bot.get_channel(config.CH_UYARI_LOG)
-        evidence_view = EvidencePromptView(warn_id, msg, log_channel)
+        evidence_view = EvidencePromptView(warn_id, msg, self)
         await interaction.followup.send(
-            f"✅ **{target.display_name}** kullanıcısına sözlü uyarı başarıyla iletildi (`{warn_id}`).\n"
-            f"İsterseniz aşağıdaki butonla bu uyarıya ekran görüntüsü kanıtı ekleyebilirsiniz:",
+            f"✅ **{target.display_name}** kişisine sözlü uyarı verildi. 📌\n\n"
+            f"Kanıt görseli eklemek ister misiniz?",
             view=evidence_view,
             ephemeral=True
         )
@@ -721,12 +715,10 @@ class WarningSystem(commands.Cog):
             database.set_warning_log_message_id(warn_id, msg.id)
 
         # Yetkiliye kanıt ekleme butonları sun
-        log_channel = self.bot.get_channel(config.CH_UYARI_LOG)
-        evidence_view = EvidencePromptView(warn_id, msg, log_channel)
+        evidence_view = EvidencePromptView(warn_id, msg, self)
         await interaction.followup.send(
-            f"✅ **{target.display_name}** kullanıcısına uyarı başarıyla uygulandı (`{warn_id}`).\n"
-            f"İşlem: `{action_taken}`\n\n"
-            f"İsterseniz aşağıdaki butonla bu uyarıya ekran görüntüsü kanıtı ekleyebilirsiniz:",
+            f"✅ **{target.display_name}** kişisine **{rule_key}** uyarısı verildi. ({points_text}) 📌\n\n"
+            f"Kanıt görseli eklemek ister misiniz?",
             view=evidence_view,
             ephemeral=True
         )
@@ -964,12 +956,11 @@ class WarningSystem(commands.Cog):
                 if log_msg and log_msg.embeds:
                     embed = log_msg.embeds[0]
                     embed.title = f"🚫 [İPTAL EDİLDİ] {embed.title}"
-                    embed.color = discord.Color.light_grey()
                     canceller = ctx_or_interaction.user if isinstance(ctx_or_interaction, discord.Interaction) else ctx_or_interaction.author
-                    embed.add_field(
-                        name="🚫 İptal Bilgisi",
-                        value=f"Bu uyarı {canceller.mention} tarafından iptal edilmiş ve cezaları geri alınmıştır.",
-                        inline=False
+                    embed.description += (
+                        f"\n\n***\n\n"
+                        f"### 🚫 İptal Bilgisi\n"
+                        f"Bu uyarı {canceller.mention} tarafından iptal edilmiş ve cezaları geri alınmıştır."
                     )
                     await log_msg.edit(embed=embed)
             except Exception as e:
