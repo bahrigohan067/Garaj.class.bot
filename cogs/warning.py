@@ -13,25 +13,109 @@ TZ = pytz.timezone("Europe/Istanbul")
 
 # ==================== KURAL LİSTESİ VE MADDELER ====================
 RULES = {
-    # Metin / Sohbet Kuralları (M1 - M13)
-    "M1": {"title": "Spam ve Flood Yapmak", "points": 1, "type": "point", "desc": "Kanallarda ardışık ve anlamsız mesaj göndererek kirlilik yaratmak."},
-    "M2": {"title": "Aşırı Büyük Harf (Caps Lock) Kullanımı", "points": 1, "type": "point", "desc": "Sohbet akışını bozacak şekilde büyük harfle yazmak."},
-    "M3": {"title": "Uygunsuz Dil ve Hafif Hakaret", "points": 2, "type": "point", "desc": "Kişilere veya ortama yönelik kaba, argo ve küfürlü söylemler."},
-    "M4": {"title": "Gereksiz Etiketleme (Yetkili / Üye)", "points": 2, "type": "point", "desc": "Sebepsiz yere yetkilileri veya üyeleri etiketleyip rahatsızlık vermek."},
-    "M5": {"title": "Kanalları Amacı Dışında Kullanmak", "points": 3, "type": "point", "desc": "Sohbet, bot komut veya medya kanallarını kurallara aykırı kullanmak."},
-    "M6": {"title": "Kışkırtma ve Toksik Davranışlar", "points": 3, "type": "point", "desc": "Topluluk huzurunu kaçırmak, tartışma başlatmak veya kışkırtmak."},
-    "M7": {"title": "Dini, Milli veya Siyasi Tartışmalar", "points": 4, "type": "point", "desc": "Sunucu içerisinde hassas ve ayrıştırıcı konuları açıp polemik yaratmak."},
-    "M8": {"title": "Özel Hayatın Gizliliği ve İfşa Tehdidi", "points": 5, "type": "timeout", "duration_days": 1, "desc": "Üyelerin kişisel bilgilerini veya fotoğraflarını izinsiz paylaşmak."},
-    "M9": {"title": "Ağır Küfür ve Ailevi Değerlere Hakaret", "points": 5, "type": "timeout", "duration_days": 2, "desc": "Nefret söylemi, ailevi veya kutsal değerlere ağır hakaret."},
-    "M10": {"title": "Trollemek ve Sunucu Düzenini Sabote Etmek", "points": 4, "type": "point", "desc": "Topluluk huzurunu kasten bozacak eylemlerde bulunmak."},
-    "M11": {"title": "Dolandırıcılık, Tehdit ve Şantaj", "points": 0, "type": "timeout", "duration_days": 4, "desc": "Üyeleri dolandırmaya çalışmak veya tehdit/şantajda bulunmak."},
-    "M12": {"title": "Yasaklı Kural İhlali ve Ağır Kaos", "points": 0, "type": "yasakli", "desc": "Sunucu güvenliğini ve düzenini ciddi şekilde riske atan ihlaller."},
-    "M13": {"title": "Reklam, DM Reklamı ve Zararlı Bağlantı Paylaşımı", "points": 0, "type": "ban", "desc": "Başka sunucu linki paylaşmak, DM'den reklam atmak veya zararlı bağlantı dağıtmak."},
+    # 1. KATEGORİ: GENEL KURALLAR (M1 - M13)
+    "M1": {
+        "title": "Küfür / Hakaret",
+        "points": 2,
+        "type": "point",
+        "desc": "Sunucumuzda küfür/hakarete başvurmak. Bununla ilgili içerik paylaşmak."
+    },
+    "M2": {
+        "title": "Reklam ve Ticari Faaliyetler",
+        "points": 0,
+        "type": "ban",
+        "desc": "Reklam yapmak, hesap/oyun satışı gibi ticari faaliyetlerde bulunmak (Özel mesaj da dahil)."
+    },
+    "M3": {
+        "title": "Abartı Övünme / Rahatsızlık Verme",
+        "points": 1,
+        "type": "point",
+        "desc": "Sunucumuzda düzenlenen etkinliklerde veya yapılacak olan kapışmalarda karşı taraf rahatsız olduğu halde kendini abartı şekilde övmek."
+    },
+    "M4": {
+        "title": "Taciz İçeren Davranışlar",
+        "points": 0,
+        "type": "timeout",
+        "duration_days": 2,
+        "desc": "Cinsiyet fark etmeksizin taciz içeren davranışlarda bulunmak."
+    },
+    "M5": {
+        "title": "Kanalları Amacı Dışında Kullanmak",
+        "points": 3,
+        "type": "point",
+        "desc": "Kanalları amacı dışında kullanmak (Örn: #bot-komut'da sohbet etmek)."
+    },
+    "M6": {
+        "title": "Cinsel İçerikli Paylaşım (+18)",
+        "points": 8,
+        "type": "point",
+        "desc": "Cinsel içerikli herhangi bir paylaşım (görsel, yazı, link) yapmak."
+    },
+    "M7": {
+        "title": "Kavga Ortamı Yaratma / Kasten Rahatsız Etme",
+        "points": 4,
+        "type": "point",
+        "desc": "Bir kişiye muhatap olmak istemediği sürece ya da kasten kavga ortamı yaratmak."
+    },
+    "M8": {
+        "title": "Zorbalık ve Üye Soğutma",
+        "points": 5,
+        "type": "point",
+        "desc": "Zorbalık yapmak, başka bir üyeyi sunucudan soğutacak davranışlarda bulunmak."
+    },
+    "M9": {
+        "title": "İzinsiz Sunucu / Grup Daveti",
+        "points": 0,
+        "type": "yasakli",
+        "desc": "Yönetimin bilgisi dışında sunucu üyelerini kendi sunucunuza veya grubunuza davet etmek."
+    },
+    "M10": {
+        "title": "Uygunsuz / Ayrımcı İçerik Paylaşımı",
+        "points": 0,
+        "type": "timeout",
+        "duration_days": 1,
+        "desc": "+18, cinsel taciz, ırkçılık, cinsiyet/yaş ayrımcılığı içeren içerik paylaşmak."
+    },
+    "M11": {
+        "title": "Irkçılık ve Ayrımcılık",
+        "points": 0,
+        "type": "timeout",
+        "duration_days": 1,
+        "desc": "Irkçılık ve her türlü ayrımcılık yapmak."
+    },
+    "M12": {
+        "title": "Psikolojik Baskı, Küçümseme ve Dalga Geçme",
+        "points": 2,
+        "type": "point",
+        "desc": "Sunucuda bulunan kişilerin psikolojisini etkileyecek argo, küçümseme ve dalga geçme gibi faaliyetler yapmak."
+    },
+    "M13": {
+        "title": "3. Taraf Yazılım / Hile Kullanımı",
+        "points": 0,
+        "type": "timeout",
+        "duration_days": 1,
+        "desc": "Sunucuda yapılan etkinliklerde ve kapışmalarda 3. Taraf yazılım kullanmak."
+    },
 
-    # Ses / Destek Kuralları (D1 - D3)
-    "D1": {"title": "Ses Kanallarında Rahatsızlık Vermek", "points": 2, "type": "point", "desc": "Soundpad, bass veya ses değiştirici ile aşırı gürültü yapmak."},
-    "D2": {"title": "Destek Odalarını Gereksiz Meşgul Etmek", "points": 3, "type": "point", "desc": "Destek bekleme veya destek odalarında trollük yapıp yetkilileri oyalamak."},
-    "D3": {"title": "İzinsiz Ses Kaydı Almak ve Paylaşmak", "points": 4, "type": "point", "desc": "Ses kanallarındaki konuşmaları izinsiz kaydedip dışarıya sızdırmak."},
+    # 2. KATEGORİ: GENEL SUNUCU DÜZENİ (Önemli Kanallar & Ses Kanalları) (D1 - D3)
+    "D1": {
+        "title": "Önemli Kanallara Boş / Anlamsız Mesaj",
+        "points": 3,
+        "type": "point",
+        "desc": "Önemli kanallara (duyuru vb.) anlamsız, boş mesajlar atmak."
+    },
+    "D2": {
+        "title": "Kanal / Panel Spawnlama ve Meşgul Etme",
+        "points": 3,
+        "type": "point",
+        "desc": "Ses kanallarında ses panelini veya sohbet kanallarında sohbeti gereksiz yere çağırmak (spawnlamak)."
+    },
+    "D3": {
+        "title": "Ses Kanallarında Gereksiz Oda Değiştirme",
+        "points": 3,
+        "type": "point",
+        "desc": "Önemli ses kanallarında sürekli yolculuk yaparak gereksiz bildirim yağmuruna sebep olmak."
+    },
 
     # Rol / Oyun / Roleplay Kuralları (RM1 - RM18)
     "RM1": {"title": "Rol İhlali (Fail RP / Non RP)", "points": 2, "type": "point", "desc": "Rolün gerektirdiği mantık çerçevesinin dışına çıkmak."},
