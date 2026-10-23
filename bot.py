@@ -17,9 +17,10 @@ class GararjClassBot(commands.Bot):
     async def setup_hook(self):
         init_db()
         # Load extensions
-        for filename in os.listdir('./cogs'):
+        for filename in sorted(os.listdir('./cogs')):
             if filename.endswith('.py'):
                 await self.load_extension(f'cogs.{filename[:-3]}')
+                print(f'Loaded extension: cogs.{filename[:-3]}')
         
         # Sync slash commands
         guild = discord.Object(id=GUILD_ID)
