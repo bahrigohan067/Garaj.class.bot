@@ -344,6 +344,14 @@ class YouTubeNotifierCog(commands.Cog):
         if not channel_id:
             return
 
+        # Eğer Railway'e yanlışlıkla link veya @handle girildiyse otomatik UC... ID'sine çevir
+        if not channel_id.startswith("UC"):
+            resolved_cid, resolved_name = await self.resolve_youtube_channel_id(channel_id)
+            if not resolved_cid:
+                return
+            set_youtube_config(resolved_cid, resolved_name or "The_yagi.264")
+            channel_id = resolved_cid
+
         guild = self.bot.get_guild(GUILD_ID)
         if not guild:
             return
