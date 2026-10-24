@@ -122,6 +122,26 @@ def init_db():
         )
     """)
 
+    # YouTube channel configuration
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS youtube_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            channel_id TEXT,
+            channel_name TEXT,
+            updated_at TEXT
+        )
+    """)
+
+    # YouTube notified videos (prevents duplicate DM notifications)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS youtube_notified_videos (
+            video_id TEXT PRIMARY KEY,
+            title TEXT,
+            published_at TEXT,
+            notified_at TEXT
+        )
+    """)
+
     # Seed default market items with stock = 0 if not already present
     default_market = {
         "1m": [
@@ -758,3 +778,62 @@ def get_top_coin_users(limit=10):
         {"user_id": r[0], "coins": r[1], "total_earned": r[2], "total_spent": r[3]}
         for r in rows
     ]
+
+# ==================== YOUTUBE BİLDİRİM VERİTABANI FONKSİYONLARI ====================
+
+def set_youtube_config(channel_id, channel_name=""):
+    now_str = datetime.datetime.now(TZ).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO youtube_config (id, channel_id, channel_name, updated_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            channel_id = excluded.channel_id,
+            channel_name = excluded.channel_name,
+            updated_at = excluded.updated_at
+    """, (channel_id, channel_name, now_str))
+    conn.commit()
+    conn.close()
+
+def get_youtube_config():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_id, channel_name, updated_at FROM youtube_config WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "channel_id": row[0],
+        "channel_name": row[1] or "GararjClass",
+        "updated_at": row[2]
+    }
+
+def is_youtube_video_notified(video_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM youtube_notified_videos WHERE video_id = ?", (video_id,))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+def mark_youtube_video_notified(video_id, title="", published_at=""):
+    now_str = datetime.datetime.now(TZ).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR IGNORE INTO youtube_notified_videos (video_id, title, published_at, notified_at)
+        VALUES (?, ?, ?, ?)
+    """, (video_id, title, published_at, now_str))
+    conn.commit()
+    conn.close()
+
+def get_notified_videos_count():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM youtube_notified_videos")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
