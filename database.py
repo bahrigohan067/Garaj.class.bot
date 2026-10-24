@@ -72,6 +72,113 @@ def init_db():
             timeout_10_applied INTEGER DEFAULT 0
         )
     """)
+
+    # Gaca-Coin user balances and progress
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_coins (
+            user_id INTEGER PRIMARY KEY,
+            coins INTEGER DEFAULT 0,
+            total_earned INTEGER DEFAULT 0,
+            total_spent INTEGER DEFAULT 0,
+            msg_progress INTEGER DEFAULT 0,
+            voice_minutes INTEGER DEFAULT 0,
+            total_messages INTEGER DEFAULT 0,
+            total_voice_minutes INTEGER DEFAULT 0
+        )
+    """)
+
+    # Market items & stock (tier: '1m', '3m', 'perm')
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS market_items (
+            tier TEXT,
+            item_index INTEGER,
+            role_id INTEGER,
+            price INTEGER,
+            stock INTEGER DEFAULT 0,
+            PRIMARY KEY (tier, role_id)
+        )
+    """)
+
+    # User active & historical role purchases
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            role_id INTEGER,
+            tier TEXT,
+            price INTEGER,
+            purchased_at TEXT,
+            expires_at TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+
+    # Persistent market panel message IDs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS market_panels (
+            panel_type TEXT PRIMARY KEY,
+            channel_id INTEGER,
+            message_id INTEGER
+        )
+    """)
+
+    # Seed default market items with stock = 0 if not already present
+    default_market = {
+        "1m": [
+            (1, 1561301908596072528, 40),
+            (2, 1561302629454315661, 40),
+            (3, 1561302447904002239, 60),
+            (4, 1540461675793092668, 25),
+            (5, 1561302111990452284, 20),
+            (6, 1561302187290656798, 40),
+            (7, 1561302317301633135, 30),
+            (8, 1561302551104851978, 20),
+            (9, 1561302716624670780, 40),
+            (10, 1561303044585685012, 40),
+            (11, 1561303095798136852, 30),
+            (12, 1561303177129754725, 50),
+            (13, 1561304271587115019, 25),
+            (14, 1561304162933801001, 25),
+            (15, 1561304468446773258, 25),
+        ],
+        "3m": [
+            (1, 1561301908596072528, 70),
+            (2, 1561302629454315661, 70),
+            (3, 1561302447904002239, 110),
+            (4, 1540461675793092668, 50),
+            (5, 1561302111990452284, 35),
+            (6, 1561302187290656798, 70),
+            (7, 1561302317301633135, 55),
+            (8, 1561302551104851978, 35),
+            (9, 1561302716624670780, 70),
+            (10, 1561303044585685012, 70),
+            (11, 1561303095798136852, 30),
+            (12, 1561303177129754725, 50),
+        ],
+        "perm": [
+            (1, 1561301908596072528, 300),
+            (2, 1561302629454315661, 300),
+            (3, 1561302447904002239, 330),
+            (4, 1540461675793092668, 150),
+            (5, 1561302111990452284, 110),
+            (6, 1561302187290656798, 160),
+            (7, 1561302317301633135, 150),
+            (8, 1561302551104851978, 80),
+            (9, 1561302716624670780, 180),
+            (10, 1561303044585685012, 180),
+            (11, 1561303095798136852, 90),
+            (12, 1561303177129754725, 150),
+        ]
+    }
+    for tier, items in default_market.items():
+        for idx, r_id, price in items:
+            cursor.execute("""
+                INSERT INTO market_items (tier, item_index, role_id, price, stock)
+                VALUES (?, ?, ?, ?, 0)
+                ON CONFLICT(tier, role_id) DO UPDATE SET
+                    item_index = excluded.item_index,
+                    price = excluded.price
+            """, (tier, idx, r_id, price))
     
     conn.commit()
     conn.close()
@@ -344,3 +451,310 @@ def clear_user_jail(user_id):
     cursor.execute("UPDATE user_warn_points SET jail_until = NULL WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
+
+# ==================== GACA-COIN & ROL MARKETİ VERİTABANI FONKSİYONLARI ====================
+
+def get_user_coin_data(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT coins, total_earned, total_spent, msg_progress, voice_minutes, total_messages, total_voice_minutes
+        FROM user_coins WHERE user_id = ?
+    """, (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.execute("""
+            INSERT INTO user_coins (user_id, coins, total_earned, total_spent, msg_progress, voice_minutes, total_messages, total_voice_minutes)
+            VALUES (?, 0, 0, 0, 0, 0, 0, 0)
+        """, (user_id,))
+        conn.commit()
+        conn.close()
+        return {
+            "user_id": user_id,
+            "coins": 0,
+            "total_earned": 0,
+            "total_spent": 0,
+            "msg_progress": 0,
+            "voice_minutes": 0,
+            "total_messages": 0,
+            "total_voice_minutes": 0
+        }
+    conn.close()
+    return {
+        "user_id": user_id,
+        "coins": row[0] or 0,
+        "total_earned": row[1] or 0,
+        "total_spent": row[2] or 0,
+        "msg_progress": row[3] or 0,
+        "voice_minutes": row[4] or 0,
+        "total_messages": row[5] or 0,
+        "total_voice_minutes": row[6] or 0
+    }
+
+def increment_user_message_coin(user_id):
+    """Her 20 mesajda +1 Gaca-Coin verir. Dönen değer: (kazandi_mi, yeni_bakiye, toplam_mesaj, ilerleme)"""
+    data = get_user_coin_data(user_id)
+    new_progress = data["msg_progress"] + 1
+    new_total_msgs = data["total_messages"] + 1
+    coins = data["coins"]
+    total_earned = data["total_earned"]
+    earned = False
+
+    if new_progress >= 20:
+        new_progress = 0
+        coins += 1
+        total_earned += 1
+        earned = True
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE user_coins
+        SET coins = ?, total_earned = ?, msg_progress = ?, total_messages = ?
+        WHERE user_id = ?
+    """, (coins, total_earned, new_progress, new_total_msgs, user_id))
+    conn.commit()
+    conn.close()
+    return earned, coins, new_total_msgs, new_progress
+
+def increment_user_voice_minute_coin(user_id, minutes=1):
+    """Her 5 dakika seste durmada +1 Gaca-Coin verir. Dönen değer: (kazanilan_coin, yeni_bakiye, toplam_dakika, ilerleme)"""
+    data = get_user_coin_data(user_id)
+    new_voice_prog = data["voice_minutes"] + minutes
+    new_total_voice = data["total_voice_minutes"] + minutes
+    coins = data["coins"]
+    total_earned = data["total_earned"]
+    earned_coins = 0
+
+    if new_voice_prog >= 5:
+        earned_coins = new_voice_prog // 5
+        new_voice_prog = new_voice_prog % 5
+        coins += earned_coins
+        total_earned += earned_coins
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE user_coins
+        SET coins = ?, total_earned = ?, voice_minutes = ?, total_voice_minutes = ?
+        WHERE user_id = ?
+    """, (coins, total_earned, new_voice_prog, new_total_voice, user_id))
+    conn.commit()
+    conn.close()
+    return earned_coins, coins, new_total_voice, new_voice_prog
+
+def adjust_user_coins(user_id, amount):
+    """Founder/Yönetici tarafından kullanıcıya coin ekleme veya çıkarma."""
+    data = get_user_coin_data(user_id)
+    new_coins = max(0, data["coins"] + amount)
+    new_earned = data["total_earned"] + amount if amount > 0 else data["total_earned"]
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE user_coins SET coins = ?, total_earned = ? WHERE user_id = ?", (new_coins, new_earned, user_id))
+    conn.commit()
+    conn.close()
+    return new_coins
+
+def get_market_items(tier=None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    if tier:
+        cursor.execute("""
+            SELECT tier, item_index, role_id, price, stock
+            FROM market_items WHERE tier = ? ORDER BY item_index ASC
+        """, (tier,))
+    else:
+        cursor.execute("""
+            SELECT tier, item_index, role_id, price, stock
+            FROM market_items ORDER BY tier ASC, item_index ASC
+        """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "tier": r[0],
+            "item_index": r[1],
+            "role_id": r[2],
+            "price": r[3],
+            "stock": r[4]
+        }
+        for r in rows
+    ]
+
+def get_market_item(tier, role_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT tier, item_index, role_id, price, stock
+        FROM market_items WHERE tier = ? AND role_id = ?
+    """, (tier, role_id))
+    r = cursor.fetchone()
+    conn.close()
+    if not r:
+        return None
+    return {
+        "tier": r[0],
+        "item_index": r[1],
+        "role_id": r[2],
+        "price": r[3],
+        "stock": r[4]
+    }
+
+def update_market_stock(tier, role_id, amount, mode="add"):
+    """Market stoğunu günceller. mode='add' ise üstüne ekler, mode='set' ise doğrudan eşitler."""
+    item = get_market_item(tier, role_id)
+    if not item:
+        return None
+    if mode == "set":
+        new_stock = max(0, amount)
+    else:
+        new_stock = max(0, item["stock"] + amount)
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE market_items SET stock = ? WHERE tier = ? AND role_id = ?", (new_stock, tier, role_id))
+    conn.commit()
+    conn.close()
+    return new_stock
+
+def get_user_active_purchases(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, user_id, role_id, tier, price, purchased_at, expires_at, is_active
+        FROM user_purchases WHERE user_id = ? AND is_active = 1
+        ORDER BY purchased_at DESC
+    """, (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": r[0],
+            "user_id": r[1],
+            "role_id": r[2],
+            "tier": r[3],
+            "price": r[4],
+            "purchased_at": r[5],
+            "expires_at": r[6],
+            "is_active": r[7]
+        }
+        for r in rows
+    ]
+
+def has_active_role_purchase(user_id, role_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT COUNT(*) FROM user_purchases
+        WHERE user_id = ? AND role_id = ? AND is_active = 1
+    """, (user_id, role_id))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def create_role_purchase(user_id, role_id, tier, price, expires_at):
+    """Coin düşer, stok düşer ve satın alma kaydı oluşturur."""
+    now_str = datetime.datetime.now(TZ).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT coins, total_spent FROM user_coins WHERE user_id = ?", (user_id,))
+    u_row = cursor.fetchone()
+    current_coins = u_row[0] if u_row else 0
+    current_spent = u_row[1] if u_row else 0
+
+    cursor.execute("SELECT stock FROM market_items WHERE tier = ? AND role_id = ?", (tier, role_id))
+    m_row = cursor.fetchone()
+    current_stock = m_row[0] if m_row else 0
+
+    if current_stock <= 0:
+        conn.close()
+        return False, "stok_yok", current_coins, 0
+
+    if current_coins < price:
+        conn.close()
+        return False, "bakiye_yetersiz", current_coins, current_stock
+
+    new_coins = current_coins - price
+    new_spent = current_spent + price
+    new_stock = current_stock - 1
+
+    cursor.execute("UPDATE user_coins SET coins = ?, total_spent = ? WHERE user_id = ?", (new_coins, new_spent, user_id))
+    cursor.execute("UPDATE market_items SET stock = ? WHERE tier = ? AND role_id = ?", (new_stock, tier, role_id))
+    cursor.execute("""
+        INSERT INTO user_purchases (user_id, role_id, tier, price, purchased_at, expires_at, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, 1)
+    """, (user_id, role_id, tier, price, now_str, expires_at))
+
+    conn.commit()
+    conn.close()
+    return True, "basarili", new_coins, new_stock
+
+def get_expired_role_purchases():
+    """Süresi dolmuş aktif rol satın alımlarını döndürür."""
+    now_str = datetime.datetime.now(TZ).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, user_id, role_id, tier, price, purchased_at, expires_at
+        FROM user_purchases
+        WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at <= ?
+    """, (now_str,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": r[0],
+            "user_id": r[1],
+            "role_id": r[2],
+            "tier": r[3],
+            "price": r[4],
+            "purchased_at": r[5],
+            "expires_at": r[6]
+        }
+        for r in rows
+    ]
+
+def mark_purchase_expired(purchase_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE user_purchases SET is_active = 0 WHERE id = ?", (purchase_id,))
+    conn.commit()
+    conn.close()
+
+def save_market_panel(panel_type, channel_id, message_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO market_panels (panel_type, channel_id, message_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(panel_type) DO UPDATE SET
+            channel_id = excluded.channel_id,
+            message_id = excluded.message_id
+    """, (panel_type, channel_id, message_id))
+    conn.commit()
+    conn.close()
+
+def get_market_panel(panel_type):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_id, message_id FROM market_panels WHERE panel_type = ?", (panel_type,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"channel_id": row[0], "message_id": row[1]}
+
+def get_top_coin_users(limit=10):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT user_id, coins, total_earned, total_spent
+        FROM user_coins ORDER BY coins DESC, total_earned DESC LIMIT ?
+    """, (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {"user_id": r[0], "coins": r[1], "total_earned": r[2], "total_spent": r[3]}
+        for r in rows
+    ]
