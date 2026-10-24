@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import datetime
 import pytz
+import re
 import config
 import database
 
@@ -241,12 +242,171 @@ class CoinMarketSystem(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Bot açıldığında panelleri kontrol eder; eksik olan varsa otomatik kurar, varsa günceller."""
+        """Bot açıldığında önce Discord'daki mevcut stok ve bakiye/rol verilerini kurtarır, ardından panelleri senkronize eder."""
         guild = self.bot.get_guild(config.GUILD_ID)
         if not guild:
             return
-        print("[Gaca-Coin & Market] Market ve Stok panelleri senkronize ediliyor...")
-        await self.ensure_all_panels(guild)
+        print("[Gaca-Coin & Market] Mevcut stoklar, bakiyeler ve paneller kontrol ediliyor...")
+        await self.recover_state_from_discord(guild)
+        await self.ensure_all_panels(guild, force_new=False)
+
+    async def recover_state_from_discord(self, guild: discord.Guild):
+        """
+        Railway güncellemesi sonrası veritabanı sıfırlansa bile:
+        1) Mevcut market panellerinden güncel stokları okur ve geri yükler (stok sıfırlanmasını önler).
+        2) Coin log kanalından kullanıcı bakiyelerini ve aktif süreli/kalıcı rol satın alımlarını geri yükler.
+        """
+        # 1. Market kanallarındaki mevcut panellerden stokları geri yükle
+        for tier, info in TIER_INFO.items():
+            ch = guild.get_channel(info["channel_id"])
+            if not ch:
+                try:
+                    ch = await guild.fetch_channel(info["channel_id"])
+                except Exception:
+                    continue
+
+            try:
+                async for m in ch.history(limit=25):
+                    if m.author.id == self.bot.user.id and m.embeds:
+                        desc = m.embeds[0].description or ""
+                        if "Ürün Listesi" in desc or "Stok:" in desc:
+                            matches = re.findall(r"<@&(\d+)>.*?Stok:\s*(\d+)", desc)
+                            found_nonzero = False
+                            for r_id_str, st_str in matches:
+                                r_id = int(r_id_str)
+                                st_val = int(st_str)
+                                if st_val > 0:
+                                    found_nonzero = True
+                                current_item = database.get_market_item(tier, r_id)
+                                if current_item and current_item["stock"] == 0 and st_val > 0:
+                                    database.update_market_stock(tier, r_id, st_val, mode="set")
+                            if found_nonzero:
+                                break
+            except Exception as e:
+                print(f"[Market Stok Kurtarma Hatası - {tier}]: {e}")
+
+        # 2. Coin Log kanalından kullanıcı bakiyelerini ve aktif rol satın alımlarını geri yükle
+        log_ch = await self.get_coin_log_channel(guild)
+        if not log_ch:
+            return
+
+        try:
+            history_msgs = [m async for m in log_ch.history(limit=400)]
+            history_msgs.reverse()  # Eskiden yeniye doğru işle
+
+            user_stats = {}
+            active_purchases_map = {}  # (user_id, role_id) -> dict
+
+            for m in history_msgs:
+                if m.author.id != self.bot.user.id or not m.embeds:
+                    continue
+                emb = m.embeds[0]
+                title = emb.title or ""
+                desc = emb.description or ""
+
+                # Kullanıcı ID bul
+                u_match = re.search(r"<@!?(\d+)>", m.content or "") or re.search(r"<@!?(\d+)>", desc)
+                if not u_match:
+                    continue
+                uid = int(u_match.group(1))
+                if uid not in user_stats:
+                    user_stats[uid] = {
+                        "coins": 0,
+                        "total_earned": 0,
+                        "total_spent": 0,
+                        "total_messages": 0,
+                        "total_voice_minutes": 0,
+                    }
+
+                if "Gaca-Coin Kazanıldı" in title:
+                    b_match = re.search(r"Güncel Bakiyeniz:\*\*\s*`(\d+)\s*Gaca-Coin`", desc)
+                    e_match = re.search(r"Kazanılan Miktar:\*\*\s*\`\+(\d+)\s*Gaca-Coin\`", desc)
+                    msg_match = re.search(r"Toplam Mesaj Sayısı:\*\*\s*`(\d+)", desc)
+                    vc_match = re.search(r"Toplam Ses Süresi:\*\*\s*`(\d+)", desc)
+                    if b_match:
+                        user_stats[uid]["coins"] = int(b_match.group(1))
+                    if e_match:
+                        user_stats[uid]["total_earned"] += int(e_match.group(1))
+                    if msg_match:
+                        user_stats[uid]["total_messages"] = max(user_stats[uid]["total_messages"], int(msg_match.group(1)))
+                    if vc_match:
+                        user_stats[uid]["total_voice_minutes"] = max(user_stats[uid]["total_voice_minutes"], int(vc_match.group(1)))
+
+                elif "Founder Bakiye Güncellemesi" in title:
+                    b_match = re.search(r"Yeni Bakiye:\*\*\s*`(\d+)\s*Gaca-Coin`", desc)
+                    add_match = re.search(r"Eklenen/Çıkarılan:\*\*\s*`([+-]?\d+)\s*Gaca-Coin`", desc)
+                    if b_match:
+                        user_stats[uid]["coins"] = int(b_match.group(1))
+                    if add_match and int(add_match.group(1)) > 0:
+                        user_stats[uid]["total_earned"] += int(add_match.group(1))
+
+                elif "Rol Marketi Satın Alımı" in title:
+                    b_match = re.search(r"Kalan Bakiye:\*\*\s*`(\d+)\s*Gaca-Coin`", desc)
+                    sp_match = re.search(r"Harcanan Coin:\*\*\s*`-(\d+)\s*Gaca-Coin`", desc)
+                    r_match = re.search(r"Satın Alınan Rol:\*\*\s*<@&(\d+)>", desc)
+                    t_match = re.search(r"Paket Süresi:\*\*\s*`([^`]+)`", desc)
+                    exp_match = re.search(r"Rol Bitiş Tarihi:\*\*\s*<t:(\d+):F>", desc)
+
+                    if b_match:
+                        user_stats[uid]["coins"] = int(b_match.group(1))
+                    price_val = int(sp_match.group(1)) if sp_match else 0
+                    user_stats[uid]["total_spent"] += price_val
+
+                    if r_match:
+                        rid = int(r_match.group(1))
+                        tier_str = t_match.group(1) if t_match else ""
+                        if "1 Aylık" in tier_str:
+                            t_key = "1m"
+                        elif "3 Aylık" in tier_str:
+                            t_key = "3m"
+                        else:
+                            t_key = "perm"
+
+                        expires_iso = None
+                        if exp_match:
+                            exp_ts = int(exp_match.group(1))
+                            expires_iso = datetime.datetime.fromtimestamp(exp_ts, TZ).isoformat()
+
+                        active_purchases_map[(uid, rid)] = {
+                            "user_id": uid,
+                            "role_id": rid,
+                            "tier": t_key,
+                            "price": price_val,
+                            "purchased_at": m.created_at.astimezone(TZ).isoformat(),
+                            "expires_at": expires_iso,
+                        }
+
+                elif "Süreli Market Rolünün Süresi Doldu" in title:
+                    r_match = re.search(r"<@&(\d+)>", desc)
+                    if r_match:
+                        rid = int(r_match.group(1))
+                        active_purchases_map.pop((uid, rid), None)
+
+            # Veritabanında bakiye 0 ise kurtarılan verileri yaz
+            for uid, st in user_stats.items():
+                cur = database.get_user_coin_data(uid)
+                if cur["coins"] == 0 and cur["total_earned"] == 0 and (st["coins"] > 0 or st["total_earned"] > 0):
+                    database.restore_user_coin_state(
+                        uid,
+                        coins=st["coins"],
+                        total_earned=max(st["total_earned"], st["coins"] + st["total_spent"]),
+                        total_spent=st["total_spent"],
+                        total_messages=st["total_messages"],
+                        total_voice_minutes=st["total_voice_minutes"],
+                    )
+
+            # Aktif rol satın alımlarını geri yükle
+            for (uid, rid), p_info in active_purchases_map.items():
+                database.restore_active_purchase_state(
+                    user_id=p_info["user_id"],
+                    role_id=p_info["role_id"],
+                    tier=p_info["tier"],
+                    price=p_info["price"],
+                    purchased_at=p_info["purchased_at"],
+                    expires_at=p_info["expires_at"],
+                )
+        except Exception as e:
+            print(f"[Coin & Rol Kurtarma Hatası]: {e}")
 
     # ------------------ PANEL OLUŞTURMA VE YENİLEME ------------------
 
@@ -383,6 +543,36 @@ class CoinMarketSystem(commands.Cog):
 
         return embed, view
 
+    async def _find_and_clean_channel_panels(self, channel: discord.TextChannel, force_new: bool = False):
+        """Kanaldaki mevcut bot panel mesajlarını bulur; fazlalık/tekrar eden eski panelleri siler."""
+        bot_msgs = []
+        try:
+            async for m in channel.history(limit=30):
+                if m.author.id == self.bot.user.id and m.embeds:
+                    bot_msgs.append(m)
+        except Exception:
+            return None
+
+        if not bot_msgs:
+            return None
+
+        if force_new:
+            for old_m in bot_msgs:
+                try:
+                    await old_m.delete()
+                except Exception:
+                    pass
+            return None
+
+        # En güncel paneli tut, eski kopyaları sil
+        keep_msg = bot_msgs[0]
+        for dup_m in bot_msgs[1:]:
+            try:
+                await dup_m.delete()
+            except Exception:
+                pass
+        return keep_msg
+
     async def refresh_market_panel(self, guild: discord.Guild, tier: str, force_new: bool = False):
         info = TIER_INFO[tier]
         channel = guild.get_channel(info["channel_id"])
@@ -403,7 +593,17 @@ class CoinMarketSystem(commands.Cog):
             except Exception:
                 pass
 
-        # Mevcut mesaj bulunamadıysa veya force_new ise yeni gönder
+        # Kanal geçmişinde mevcut bir panel varsa onu kullan (tekrar kurmayı önler ve kopyaları temizler)
+        existing_msg = await self._find_and_clean_channel_panels(channel, force_new=force_new)
+        if existing_msg and not force_new:
+            try:
+                await existing_msg.edit(embed=embed, view=view)
+                database.save_market_panel(tier, channel.id, existing_msg.id)
+                return
+            except Exception:
+                pass
+
+        # Mevcut mesaj hiç yoksa veya force_new ise yeni gönder
         try:
             new_msg = await channel.send(embed=embed, view=view)
             database.save_market_panel(tier, channel.id, new_msg.id)
@@ -425,6 +625,15 @@ class CoinMarketSystem(commands.Cog):
             try:
                 msg = await channel.fetch_message(saved["message_id"])
                 await msg.edit(embed=embed, view=view)
+                return
+            except Exception:
+                pass
+
+        existing_msg = await self._find_and_clean_channel_panels(channel, force_new=force_new)
+        if existing_msg and not force_new:
+            try:
+                await existing_msg.edit(embed=embed, view=view)
+                database.save_market_panel("admin", channel.id, existing_msg.id)
                 return
             except Exception:
                 pass
@@ -841,17 +1050,27 @@ class CoinMarketSystem(commands.Cog):
         msg_bar = make_progress_bar(data["msg_progress"], 20, length=10)
         voice_bar = make_progress_bar(data["voice_minutes"], 5, length=5)
 
-        if active_purchases:
-            purchase_lines = []
-            for p in active_purchases:
-                t_short = TIER_INFO.get(p["tier"], {}).get("short", p["tier"])
-                if p["expires_at"]:
-                    exp_dt = datetime.datetime.fromisoformat(p["expires_at"])
-                    exp_ts = int(exp_dt.timestamp())
-                    exp_str = f"Bitiş: <t:{exp_ts}:R> (<t:{exp_ts}:d>)"
-                else:
-                    exp_str = "♾️ **Kalıcı**"
-                purchase_lines.append(f"• <@&{p['role_id']}> (`{t_short}`) — {exp_str}")
+        purchase_lines = []
+        listed_role_ids = set()
+        for p in active_purchases:
+            listed_role_ids.add(p["role_id"])
+            t_short = TIER_INFO.get(p["tier"], {}).get("short", p["tier"])
+            if p["expires_at"]:
+                exp_dt = datetime.datetime.fromisoformat(p["expires_at"])
+                exp_ts = int(exp_dt.timestamp())
+                exp_str = f"Bitiş: <t:{exp_ts}:R> (<t:{exp_ts}:d>)"
+            else:
+                exp_str = "♾️ **Kalıcı**"
+            purchase_lines.append(f"• <@&{p['role_id']}> (`{t_short}`) — {exp_str}")
+
+        # Kullanıcının üzerinde bulunan ancak satın alma tablosunda görünmeyen market rollerini de göster
+        all_market_role_ids = {it["role_id"] for it in database.get_market_items()}
+        for r in member.roles:
+            if r.id in all_market_role_ids and r.id not in listed_role_ids:
+                listed_role_ids.add(r.id)
+                purchase_lines.append(f"• <@&{r.id}> — ✅ **Hesabınızda Aktif**")
+
+        if purchase_lines:
             roles_section = "\n".join(purchase_lines)
         else:
             roles_section = "*Şu anda marketten alınmış aktif bir rolünüz bulunmuyor.*"

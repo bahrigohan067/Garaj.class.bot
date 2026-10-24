@@ -172,8 +172,8 @@ def init_db():
             (8, 1561302551104851978, 35),
             (9, 1561302716624670780, 70),
             (10, 1561303044585685012, 70),
-            (11, 1561303095798136852, 30),
-            (12, 1561303177129754725, 50),
+            (11, 1561303095798136852, 55),
+            (12, 1561303177129754725, 90),
         ],
         "perm": [
             (1, 1561301908596072528, 300),
@@ -778,6 +778,39 @@ def get_top_coin_users(limit=10):
         {"user_id": r[0], "coins": r[1], "total_earned": r[2], "total_spent": r[3]}
         for r in rows
     ]
+
+def restore_user_coin_state(user_id, coins, total_earned=None, total_spent=None, total_messages=None, total_voice_minutes=None):
+    """Railway yeniden başlatmalarında Discord loglarından kullanıcı bakiyesini geri yükler."""
+    data = get_user_coin_data(user_id)
+    new_coins = coins if coins is not None else data["coins"]
+    new_earned = total_earned if total_earned is not None else max(data["total_earned"], new_coins)
+    new_spent = total_spent if total_spent is not None else data["total_spent"]
+    new_msgs = total_messages if total_messages is not None else data["total_messages"]
+    new_voice = total_voice_minutes if total_voice_minutes is not None else data["total_voice_minutes"]
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE user_coins
+        SET coins = ?, total_earned = ?, total_spent = ?, total_messages = ?, total_voice_minutes = ?
+        WHERE user_id = ?
+    """, (new_coins, new_earned, new_spent, new_msgs, new_voice, user_id))
+    conn.commit()
+    conn.close()
+
+def restore_active_purchase_state(user_id, role_id, tier, price, purchased_at, expires_at):
+    """Railway yeniden başlatmalarında Discord loglarından aktif rol satın alımlarını geri yükler."""
+    if has_active_role_purchase(user_id, role_id):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_purchases (user_id, role_id, tier, price, purchased_at, expires_at, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, 1)
+    """, (user_id, role_id, tier, price, purchased_at, expires_at))
+    conn.commit()
+    conn.close()
+
 
 # ==================== YOUTUBE BİLDİRİM VERİTABANI FONKSİYONLARI ====================
 
