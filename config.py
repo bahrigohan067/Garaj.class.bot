@@ -72,3 +72,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # YouTube Video Bildirim Sistemi
 ROLE_VIDEO_HABER = 1561304271587115019
 YOUTUBE_CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID", "UCzbg1z4DWEyde1GIArwHmAw")
+
+# Anti-Hijack Güvenlik Log Kanalı
+CH_SECURITY_LOG = int(os.getenv("SECURITY_LOG_CHANNEL_ID", "1565016183277883463"))
